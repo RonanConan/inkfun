@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Passthrough Trace Demo</title>
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+  <script>
+    const W = 0.5;
+    const AY = 0.15;
+    const FY = 2;
+    const AZ = 0.10;
+    const FZ = 3;
+    const CURVE_RESOLUTION = 200;
+    const TUBE_RADIUS = 0.005;
+    const MARKER_RADIUS = 0.03;
+    const TRIGGER_RADIUS = 0.05;
+    const TOLERANCE = 0.05;
+    const M = 50;
+    const MAX_TRAIL_POINTS = 5000;
+    const PEN_TIP_OFFSET = { x: 0, y: 0, z: 0 };
+    const HAND = 'right';
+    const PLACEMENT_DISTANCE = 0.6;
+    const HEIGHT_OFFSET = 0.1;
+
+    AFRAME.registerComponent('trace-demo', {
+      init: function () {
+        const THREE = AFRAME.THREE;
+        this.THREE = THREE;
+        this.state = 'idle';
+        this.tracedPoints = [];
+        this.trailCount = 0;
+        this.tipPos = new THREE.Vector3();
+        this.camPos = new THREE.Vector3();
+        this.camDir = new THREE.Vector3();
+        this.startWorld = new THREE.Vector3();
+        this.endWorld = new THREE.Vector3();
+
+        this.penEl = document.querySelector('#pen');
+        this.penEl.setAttribute('logitech-mx-ink-controls', 'hand', HAND);
+        this.scoreEl = document.querySelector('#scoreText');
+
+        const points = [];
+        for (let i = 0; i <= CURVE_RESOLUTION; i++) {
+          points.push(this.samplePoint(i / CURVE_RESOLUTION));
+        }
+        this.curve = new THREE.CatmullRomCurve3(points);
+
+        this.pathRoot = new THREE.Object3D();
+        this.pathRoot.visible = false;
+
+        const tube = new THREE.Mesh(
+          new THREE.TubeGeometry(this.curve, CURVE_RESOLUTION, TUBE_RADIUS, 8, false),
+          new THREE.MeshBasicMaterial({ color: 0x00ffff })
+        );
+        this.pathRoot.add(tube);
+
+        this.startMarker = new THREE.Mesh(
+          new THREE.SphereGeometry(MARKER_RADIUS, 16, 16),
+          new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+        );
+        this.startMarker.position.copy(this.curve.getPoint(0));
+        this.pathRoot.add(this.startMarker);
+
+        this.endMarker = new THREE.Mesh(
+          new THREE.SphereGeometry(MARKER_RADIUS, 16, 16),
+          new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        this.endMarker.position.copy(this.curve.getPoint(1));
+        this.pathRoot.add(this.endMarker);
+
+        this.el.object3D.add(this.pathRoot);
+
+        this.trailPositions = new Float32Array(MAX_TRAIL_POINTS * 3);
+        this.trailGeometry = new THREE.BufferGeometry();
+        this.trailGeometry.setAttribute('position', new THREE.BufferAttribute(this.trailPositions, 3));
+        this.trailGeometry.setDrawRange(0, 0);
+        this.trailLine = new THREE.Line(
+          this.trailGeometry,
+          new THREE.LineBasicMaterial({ color: 0xffff00 })
+        );
+        this.trailLine.frustumCulled = false;
+        this.el.object3D.add(this.trailLine);
+
+        window.addEventListener('keydown', (e) => {
+          const key = e.key.toLowerCase();
+          if (key === 'p') this.placePath();
+          if (key === 'r') this.reset();
+        });
+      },
+
+      samplePoint: function (t) {
+        return new AFRAME.THREE.Vector3(
+          -W / 2 + W * t,
+          AY * Math.sin(t * FY * 2 * Math.PI),
+          AZ * Math.sin(t * FZ * 2 * Math.PI + Math.PI / 2)
+        );
+      },
+
+      placePath: function () {
+        const cam = this.el.sceneEl.camera;
+        if (!cam) return;
+        cam.getWorldPosition(this.camPos);
+        cam.getWorldDirection(this.camDir);
+        this.camDir.y = 0;
+        this.camDir.normalize();
+        this.pathRoot.position.copy(this.camPos).addScaledVector(this.camDir, PLACEMENT_DISTANCE);
+        this.pathRoot.position.y = this.camPos.y - HEIGHT_OFFSET;
+        const target = this.camPos.clone();
+        target.y = this.pathRoot.position.y;
+        this.pathRoot.lookAt(target);
+        this.pathRoot.visible = true;
+        this.pathRoot.updateMatrixWorld(true);
+        this.startMarker.getWorldPosition(this.startWorld);
+        this.endMarker.getWorldPosition(this.endWorld);
+        this.reset();
+      },
+
+      reset: function () {
+        this.state = 'idle';
+        this.tracedPoints = [];
+        this.trailCount = 0;
+        this.trailGeometry.setDrawRange(0, 0);
+        this.scoreEl.setAttribute('value', '');
+        this.scoreEl.setAttribute('visible', false);
+      },
+
+      getTipPosition: function () {
+        this.tipPos.set(PEN_TIP_OFFSET.x, PEN_TIP_OFFSET.y, PEN_TIP_OFFSET.z);
+        this.penEl.object3D.localToWorld(this.tipPos);
+        return this.tipPos;
+      },
+
+      appendTrailPoint: function (p) {
+        if (this.trailCount >= MAX_TRAIL_POINTS) return;
+        const i = this.trailCount * 3;
+        this.trailPositions[i] = p.x;
+        this.trailPositions[i + 1] = p.y;
+        this.trailPositions[i + 2] = p.z;
+        this.trailCount++;
+        this.trailGeometry.attributes.position.needsUpdate = true;
+        this.trailGeometry.setDrawRange(0, this.trailCount);
+      },
+
+      computeScore: function () {
+        let total = 0;
+        for (let i = 0; i < M; i++) {
+          const ref = this.samplePoint(i / (M - 1));
+          this.pathRoot.localToWorld(ref);
+          let minDist = Infinity;
+          for (let j = 0; j < this.tracedPoints.length; j++) {
+            const d = ref.distanceTo(this.tracedPoints[j].position);
+            if (d < minDist) minDist = d;
+          }
+          total += Math.min(Math.max(1 - minDist / TOLERANCE, 0), 1);
+        }
+        return Math.round((total / M) * 100);
+      },
+
+      showScore: function (score) {
+        this.scoreEl.object3D.position.set(
+          this.endWorld.x,
+          this.endWorld.y + 0.1,
+          this.endWorld.z
+        );
+        this.scoreEl.setAttribute('value', 'Score: ' + score + '%');
+        this.scoreEl.setAttribute('visible', true);
+      },
+
+      tick: function () {
+        if (!this.pathRoot.visible) return;
+
+        const cam = this.el.sceneEl.camera;
+        if (this.state === 'done' && cam) {
+          cam.getWorldPosition(this.camPos);
+          this.scoreEl.object3D.lookAt(this.camPos);
+          return;
+        }
+
+        const tip = this.getTipPosition();
+
+        if (this.state === 'idle') {
+          if (tip.distanceTo(this.startWorld) < TRIGGER_RADIUS) {
+            this.state = 'tracing';
+            this.tracedPoints = [];
+            this.trailCount = 0;
+            this.trailGeometry.setDrawRange(0, 0);
+          }
+        } else if (this.state === 'tracing') {
+          this.tracedPoints.push({ position: tip.clone(), timestamp: performance.now() });
+          this.appendTrailPoint(tip);
+          if (tip.distanceTo(this.endWorld) < TRIGGER_RADIUS) {
+            this.state = 'done';
+            this.showScore(this.computeScore());
+          }
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <a-scene xr-mode-ui="XRMode: ar" trace-demo>
+    <a-entity id="pen"></a-entity>
+    <a-text id="scoreText" value="" align="center" color="#FFFFFF" width="1" visible="false"></a-text>
+  </a-scene>
+</body>
+</html>
