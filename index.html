@@ -21,6 +21,7 @@
     const HAND = 'right';
     const PLACEMENT_DISTANCE = 0.6;
     const HEIGHT_OFFSET = 0.1;
+    const TIP_INDICATOR_RADIUS = 0.008;
 
     AFRAME.registerComponent('trace-demo', {
       init: function () {
@@ -30,13 +31,12 @@
         this.tracedPoints = [];
         this.trailCount = 0;
         this.tipPos = new THREE.Vector3();
+        this.tipQuat = new THREE.Quaternion();
         this.camPos = new THREE.Vector3();
         this.camDir = new THREE.Vector3();
         this.startWorld = new THREE.Vector3();
         this.endWorld = new THREE.Vector3();
 
-        this.penEl = document.querySelector('#pen');
-        this.penEl.setAttribute('logitech-mx-ink-controls', 'hand', HAND);
         this.scoreEl = document.querySelector('#scoreText');
 
         const points = [];
@@ -69,6 +69,13 @@
         this.pathRoot.add(this.endMarker);
 
         this.el.object3D.add(this.pathRoot);
+
+        this.tipIndicator = new THREE.Mesh(
+          new THREE.SphereGeometry(TIP_INDICATOR_RADIUS, 12, 12),
+          new THREE.MeshBasicMaterial({ color: 0xffffff })
+        );
+        this.tipIndicator.visible = false;
+        this.el.object3D.add(this.tipIndicator);
 
         this.trailPositions = new Float32Array(MAX_TRAIL_POINTS * 3);
         this.trailGeometry = new THREE.BufferGeometry();
@@ -125,9 +132,30 @@
       },
 
       getTipPosition: function () {
-        this.tipPos.set(PEN_TIP_OFFSET.x, PEN_TIP_OFFSET.y, PEN_TIP_OFFSET.z);
-        this.penEl.object3D.localToWorld(this.tipPos);
-        return this.tipPos;
+        const sceneEl = this.el.sceneEl;
+        const frame = sceneEl.frame;
+        const renderer = sceneEl.renderer;
+        if (!frame || !renderer.xr.isPresenting) return null;
+        const session = renderer.xr.getSession();
+        const refSpace = renderer.xr.getReferenceSpace();
+        if (!session || !refSpace) return null;
+        for (const source of session.inputSources) {
+          if (source.handedness !== HAND || source.hand) continue;
+          const space = source.targetRaySpace || source.gripSpace;
+          if (!space) continue;
+          const pose = frame.getPose(space, refSpace);
+          if (!pose) continue;
+          const p = pose.transform.position;
+          const o = pose.transform.orientation;
+          this.tipQuat.set(o.x, o.y, o.z, o.w);
+          this.tipPos.set(PEN_TIP_OFFSET.x, PEN_TIP_OFFSET.y, PEN_TIP_OFFSET.z);
+          this.tipPos.applyQuaternion(this.tipQuat);
+          this.tipPos.x += p.x;
+          this.tipPos.y += p.y;
+          this.tipPos.z += p.z;
+          return this.tipPos;
+        }
+        return null;
       },
 
       appendTrailPoint: function (p) {
@@ -167,6 +195,10 @@
       },
 
       tick: function () {
+        const tip = this.getTipPosition();
+        this.tipIndicator.visible = !!tip;
+        if (tip) this.tipIndicator.position.copy(tip);
+
         if (!this.pathRoot.visible) return;
 
         const cam = this.el.sceneEl.camera;
@@ -176,7 +208,7 @@
           return;
         }
 
-        const tip = this.getTipPosition();
+        if (!tip) return;
 
         if (this.state === 'idle') {
           if (tip.distanceTo(this.startWorld) < TRIGGER_RADIUS) {
@@ -199,7 +231,6 @@
 </head>
 <body>
   <a-scene xr-mode-ui="XRMode: ar" trace-demo>
-    <a-entity id="pen"></a-entity>
     <a-text id="scoreText" value="" align="center" color="#FFFFFF" width="1" visible="false"></a-text>
   </a-scene>
 </body>
